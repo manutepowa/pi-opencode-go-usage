@@ -1,0 +1,15 @@
+{
+  "name": "pi-opencode-go-usage",
+  "version": "0.1.0",
+  "private": false,
+  "description": "OpenCode Go subscription usage source for Gentle Shell",
+  "license": "MIT",
+  "keywords": ["pi-package", "opencode", "gentle-shell"],
+  "type": "module",
+  "pi": {
+    "extensions": ["./index.js"]
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.js"
+  }
+}
