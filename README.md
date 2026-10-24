@@ -14,11 +14,15 @@ For a local checkout, use `pi install /path/to/pi-opencode-go-usage` instead. Lo
 
 ## Behavior
 
-The source registers `opencode-go` via the `gentle-pi:usage-source/v1` event on load and again at each `session_start` (re-registration replaces the previous source). Gentle Shell passes the active provider's existing Pi API key into the source; this extension does not read credentials itself. It requests `GET https://opencode.ai/zen/go/v1/usage` with Bearer authorization and JSON Accept headers, `cache: no-store`, and `redirect: error`. The key is never written or logged by the extension.
+The source registers `opencode-go` via the `gentle-pi:usage-source/v1` event on load and again at each `session_start` (re-registration replaces the previous source). Gentle Shell passes the active provider's existing Pi API key into the source; this extension does not read credentials itself. It requests `GET https://opencode.ai/zen/go/v1/usage` with Bearer authorization and JSON Accept headers, `cache: no-store`, `redirect: error`, and a 10-second timeout. The key is never written or logged by the extension.
 
 The response must contain all three `usage.rolling`, `usage.weekly`, and `usage.monthly` windows, each with `status` equal to `ok` or `rate-limited`, numeric 0–100 `percent`, and an ISO timestamp with a timezone in `resetsAt`. It shows 5h, week, and month rows in Gentle Shell's `/gentle:usage` panel (`alt+u` by default), and the first window in the shell bar. Percentages are used as reported; `limitReached` is set when any percentage reaches 100 or any window reports `rate-limited`. Reset times become Unix milliseconds. The endpoint does not report window lengths, so 5 hours, 7 days, and a nominal 30 days are display durations, not inferred billing periods; calendar months can differ.
 
-Missing credentials, failed HTTP/auth requests, redirects, network/JSON errors, and malformed or partial responses yield no new snapshot. Gentle Shell retains a previous valid snapshot during failed refreshes. Gentle Shell controls refresh timing (session start, periodic after turns, and manual `r` in the panel); this package does not poll independently.
+Missing credentials, failed HTTP/auth requests, redirects, network/JSON errors, and malformed or partial responses yield no new snapshot. Timeouts count as failures. Gentle Shell retains a previous valid snapshot during failed refreshes. Gentle Shell controls refresh timing (session start, periodic after turns, and manual `r` in the panel); this package does not poll independently.
+
+## Troubleshooting
+
+Set `PI_OPENCODE_GO_USAGE_DEBUG=1` before starting Pi to log why a refresh produced no snapshot, for example `[pi-opencode-go-usage] http-401`. Codes: `missing-key`, `timeout`, `network`, `redirect`, `http-<status>`, `invalid-json`, `unexpected-shape`, and `unexpected-shape:<rolling|weekly|monthly>` when the endpoint format changes. Only these fixed codes are logged, never the key or error messages.
 
 ## Limitations
 
