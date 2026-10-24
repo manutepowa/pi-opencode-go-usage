@@ -1,5 +1,7 @@
 export const PROVIDER = "opencode-go";
 export const USAGE_URL = "https://opencode.ai/zen/go/v1/usage";
+export const REQUEST_TIMEOUT_MS = 10_000;
+export const DEBUG_ENV = "PI_OPENCODE_GO_USAGE_DEBUG";
 
 // The endpoint reports reset instants, not window lengths. These are nominal
 // display durations; a calendar month is not always exactly 30 days.
@@ -25,35 +27,62 @@ function parseWindow(value, label, windowSeconds) {
 
 // Fail the entire snapshot if one allowance is missing: a partial snapshot
 // would otherwise make a depleted subscription appear less used.
-export function parseGoUsage(payload, now) {
-  if (!Number.isFinite(now) || !record(payload) || !record(payload.usage)) return undefined;
+function parseUsage(payload, now) {
+  if (!Number.isFinite(now) || !record(payload) || !record(payload.usage)) return { reason: "unexpected-shape" };
   const windows = [];
   for (const [name, label, seconds] of WINDOWS) {
     const window = parseWindow(payload.usage[name], label, seconds);
-    if (!window) return undefined;
+    if (!window) return { reason: `unexpected-shape:${name}` };
     windows.push(window);
   }
-  return {
+  return { usage: {
     provider: PROVIDER,
     plan: undefined,
     limits: [{ name: "Go", windows, limitReached: windows.some((window) => window.usedPercent >= 100) || WINDOWS.some(([name]) => payload.usage[name].status === "rate-limited") }],
     fetchedAt: now,
-  };
+  } };
 }
 
-export async function fetchGoUsage(apiKey, fetchFn, now) {
-  if (typeof apiKey !== "string" || apiKey.length === 0) return undefined;
+export function parseGoUsage(payload, now) {
+  return parseUsage(payload, now).usage;
+}
+
+// Reasons are fixed codes, never error messages, so the key cannot leak.
+function defaultReport(reason) {
+  if (process.env[DEBUG_ENV]) console.error(`[pi-opencode-go-usage] ${reason}`);
+}
+
+async function requestUsage(apiKey, fetchFn, now, timeoutMs) {
+  if (typeof apiKey !== "string" || apiKey.length === 0) return { reason: "missing-key" };
+  const signal = AbortSignal.timeout(timeoutMs);
+  let response;
   try {
-    const response = await fetchFn(USAGE_URL, {
+    response = await fetchFn(USAGE_URL, {
       method: "GET",
       headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
       cache: "no-store",
       redirect: "error",
+      signal,
     });
-    // Defense in depth against a nonconforming fetch implementation.
-    if (!response.ok || response.redirected || (response.url && response.url !== USAGE_URL)) return undefined;
-    return parseGoUsage(await response.json(), now);
   } catch {
-    return undefined;
+    return { reason: signal.aborted ? "timeout" : "network" };
   }
+  // Defense in depth against a nonconforming fetch implementation.
+  if (response.redirected || (response.url && response.url !== USAGE_URL)) return { reason: "redirect" };
+  if (!response.ok) return { reason: `http-${response.status}` };
+  let payload;
+  try {
+    payload = await response.json();
+  } catch {
+    return { reason: signal.aborted ? "timeout" : "invalid-json" };
+  }
+  return parseUsage(payload, now);
+}
+
+export async function fetchGoUsage(apiKey, fetchFn, now, { timeoutMs = REQUEST_TIMEOUT_MS, report = defaultReport } = {}) {
+  const { usage, reason } = await requestUsage(apiKey, fetchFn, now, timeoutMs);
+  if (reason) {
+    try { report(reason); } catch {}
+  }
+  return usage;
 }

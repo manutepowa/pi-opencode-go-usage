@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import extension from "../index.js";
-import { fetchGoUsage, parseGoUsage, PROVIDER, USAGE_URL } from "../src/opencode-go-usage.js";
+import { fetchGoUsage, parseGoUsage, PROVIDER, REQUEST_TIMEOUT_MS, USAGE_URL } from "../src/opencode-go-usage.js";
 
 const NOW = Date.parse("2026-09-23T12:00:00Z");
 const payload = () => ({ usage: {
@@ -55,7 +55,9 @@ test("uses fixed GET endpoint, bearer header and no redirects or cache", async (
   const result = await fetchGoUsage("test-secret", async (url, options) => {
     called++;
     assert.equal(url, USAGE_URL);
-    assert.deepEqual(options, {
+    const { signal, ...rest } = options;
+    assert.ok(signal instanceof AbortSignal);
+    assert.deepEqual(rest, {
       method: "GET", headers: { Authorization: "Bearer test-secret", Accept: "application/json" },
       cache: "no-store", redirect: "error",
     });
@@ -110,5 +112,66 @@ test("registers standalone source initially and at every session start without r
     assert.equal(source.provider, "opencode-go");
     assert.equal(source.fetch, fetchGoUsage);
     assert.equal(await source.fetch("secret", async () => response(), NOW).then((usage) => JSON.stringify(usage).includes("secret")), false);
+  }
+});
+
+const hang = (url, { signal }) => new Promise((_, reject) => signal.addEventListener("abort", () => reject(signal.reason)));
+
+test("aborts a request that exceeds the timeout and reports it", async () => {
+  const reasons = [];
+  const started = Date.now();
+  const result = await fetchGoUsage("secret", hang, NOW, { timeoutMs: 20, report: (reason) => reasons.push(reason) });
+  assert.equal(result, undefined);
+  assert.ok(Date.now() - started < 1000);
+  assert.deepEqual(reasons, ["timeout"]);
+});
+
+test("default timeout is ten seconds", () => {
+  assert.equal(REQUEST_TIMEOUT_MS, 10_000);
+});
+
+test("reports a reason code for each failure without the key", async () => {
+  const cases = [
+    [undefined, async () => response(), "missing-key"],
+    ["secret", async () => response(undefined, { ok: false, status: 401 }), "http-401"],
+    ["secret", async () => response(undefined, { ok: false, status: 500 }), "http-500"],
+    ["secret", async () => response(undefined, { redirected: true }), "redirect"],
+    ["secret", async () => response(undefined, { url: "https://other.example/usage" }), "redirect"],
+    ["secret", async () => { throw Error("secret: network failure"); }, "network"],
+    ["secret", async () => response(undefined, { json: async () => { throw Error("secret: invalid JSON"); } }), "invalid-json"],
+    ["secret", async () => response({ usage: [] }), "unexpected-shape"],
+  ];
+  for (const name of ["rolling", "weekly", "monthly"]) {
+    const data = payload();
+    data.usage[name].status = "exhausted";
+    cases.push(["secret", async () => response(data), `unexpected-shape:${name}`]);
+  }
+  for (const [key, fetchFn, expected] of cases) {
+    const reasons = [];
+    assert.equal(await fetchGoUsage(key, fetchFn, NOW, { report: (reason) => reasons.push(reason) }), undefined);
+    assert.deepEqual(reasons, [expected]);
+  }
+});
+
+test("a successful fetch reports nothing", async () => {
+  const reasons = [];
+  assert.ok(await fetchGoUsage("secret", async () => response(), NOW, { report: (reason) => reasons.push(reason) }));
+  assert.deepEqual(reasons, []);
+});
+
+test("default reporter logs only when PI_OPENCODE_GO_USAGE_DEBUG is set", async () => {
+  const original = console.error;
+  const lines = [];
+  console.error = (...args) => lines.push(args.join(" "));
+  try {
+    delete process.env.PI_OPENCODE_GO_USAGE_DEBUG;
+    await fetchGoUsage("secret", async () => response(undefined, { ok: false, status: 401 }), NOW);
+    assert.deepEqual(lines, []);
+    process.env.PI_OPENCODE_GO_USAGE_DEBUG = "1";
+    await fetchGoUsage("secret", async () => response(undefined, { ok: false, status: 401 }), NOW);
+    assert.deepEqual(lines, ["[pi-opencode-go-usage] http-401"]);
+  } finally {
+    console.error = original;
+    delete process.env.PI_OPENCODE_GO_USAGE_DEBUG;
   }
 });
